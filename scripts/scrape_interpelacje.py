@@ -46,12 +46,10 @@ except ImportError:
 
 BIP_BASE = "https://bip.um.szczecin.pl/"
 
-# Spróbuj różnych możliwych stron z interpelacjami
-# Struktura BIP Szczecin może się różnić — będziemy szukać linków
-INTERPELACJE_SEARCH_URLS = [
-    f"{BIP_BASE}chapter_50533",  # przykładowy chapter ID dla interpelacji
-    f"{BIP_BASE}chapter_50534",  # przykładowy chapter ID dla zapytań
-]
+# Strona z wyszukiwarką interpelacji (ładuje dane przez AJAX/GET)
+INTERPELACJE_PAGE = f"{BIP_BASE}chapter_50951.asp"
+INTERPELACJE_AJAX = f"{BIP_BASE}contextsearch_xmldata_202FB59412A141BB91AFE00CE2C70636.asp"
+ROWS_PER_PAGE = 30
 
 KADENCJE = {
     "2024-2029": {"label": "IX kadencja (2024–2029)", "start": "2024-05-07"},
@@ -240,40 +238,121 @@ def scrape_interpelacje_list(urls: list[str], debug: bool = False) -> list[dict]
     return records
 
 
-def scrape_interpelacje_from_bip(debug: bool = False) -> list[dict]:
-    """Main scraping function — try different approaches."""
+def scrape_interpelacje_from_bip(kadencja: str = "2024-2029", debug: bool = False) -> list[dict]:
+    """Pobierz interpelacje z AJAX endpoint BIP Szczecin.
+
+    BIP Szczecin serwuje dane przez GET endpoint zwracający JSON
+    z polem 'html' zawierającym tabelę HTML.
+    Kolumny: Kadencja, Numer, Tytuł, Rodzaj, Data wpływu, Interpelujący, Data odpowiedzi.
+    """
+    import html as html_mod
+
+    kadencja_roman = {"2024-2029": "IX", "2018-2024": "VIII"}.get(kadencja, "IX")
+
+    print(f"\n=== Pobieranie interpelacji z BIP Szczecin ===")
+    print(f"  Kadencja: {kadencja} ({kadencja_roman})")
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.headers["Referer"] = INTERPELACJE_PAGE
+
+    # Inicjalizacja sesji (cookies)
+    session.get(INTERPELACJE_PAGE, timeout=30)
+
     all_records = []
+    page = 1
 
-    print("\n=== Wyszukiwanie interpelacji w BIP Szczecin ===")
+    while True:
+        url = (
+            f"{INTERPELACJE_AJAX}?mode=s&chapterid=&_search=false"
+            f"&page={page}&rows={ROWS_PER_PAGE}&sidx=f7&sord=desc"
+        )
+        if debug:
+            print(f"  GET page {page}: {url}")
 
-    # Try predefined chapter URLs
-    for url in INTERPELACJE_SEARCH_URLS:
-        print(f"\nPróbuję: {url}")
-        records = scrape_interpelacje_list([url], debug=debug)
-        if records:
-            print(f"  Znaleziono {len(records)} rekordów")
-            all_records.extend(records)
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"  BLAD na stronie {page}: {e}")
+            break
 
-    # If no luck, try searching from main BIP page
-    if not all_records:
-        print(f"\nPróbuję główną stronę BIP...")
-        soup = fetch_page(BIP_BASE)
-        if soup:
-            # Find links that mention interpelacje
-            for a in soup.find_all("a", href=True):
-                text = a.get_text(strip=True).lower()
-                if "interpelacja" in text or "zapytanie" in text:
-                    href = a["href"]
-                    if not href.startswith("http"):
-                        href = requests.compat.urljoin(BIP_BASE, href)
-                    print(f"\nZnaleziona sekcja: {text} → {href}")
-                    records = scrape_interpelacje_list([href], debug=debug)
-                    if records:
-                        print(f"  Znaleziono {len(records)} rekordów")
-                        all_records.extend(records)
-                    if len(all_records) > 100:
-                        break
+        total_pages = int(data.get("total", 0))
+        total_records = int(data.get("records", 0))
+        if page == 1:
+            print(f"  Razem: {total_records} rekordow na {total_pages} stronach")
 
+        html_content = html_mod.unescape(data.get("html", ""))
+        if not html_content:
+            break
+
+        soup = BeautifulSoup(html_content, "lxml")
+        table = soup.find("table")
+        if not table:
+            break
+
+        rows = table.find_all("tr")[1:]  # skip header
+        if not rows:
+            break
+
+        page_count = 0
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) < 7:
+                continue
+
+            kad = cells[0].get_text(strip=True)
+            # Filtruj po kadencji
+            if kad != kadencja_roman:
+                continue
+
+            numer = cells[1].get_text(strip=True)
+            tytul = cells[2].get_text(strip=True)
+            rodzaj = cells[3].get_text(strip=True).lower()
+            data_wplywu = cells[4].get_text(strip=True)
+            radny = cells[5].get_text(strip=True)
+            data_odpowiedzi = cells[6].get_text(strip=True)
+
+            # URL szczegółów
+            link = row.find("a", href=True)
+            detail_url = ""
+            if link:
+                href = link["href"]
+                if not href.startswith("http"):
+                    detail_url = BIP_BASE + href
+                else:
+                    detail_url = href
+
+            typ = "interpelacja" if "interpelacja" in rodzaj else "zapytanie"
+
+            cri = f"szczecin-{kadencja}-{numer}"
+
+            record = {
+                "cri": cri,
+                "miasto": "szczecin",
+                "kadencja": kadencja,
+                "numer": numer,
+                "typ": typ,
+                "tytul": tytul,
+                "radny": radny,
+                "data_wplywu": data_wplywu,
+                "data_odpowiedzi": data_odpowiedzi if data_odpowiedzi else None,
+                "url": detail_url,
+            }
+            all_records.append(record)
+            page_count += 1
+
+        if debug:
+            print(f"  Strona {page}: {page_count} rekordow (kadencja {kadencja_roman})")
+
+        if page >= total_pages:
+            break
+
+        page += 1
+        time.sleep(0.5)
+
+    print(f"  Pobrano: {len(all_records)} rekordow")
     return all_records
 
 
@@ -337,7 +416,7 @@ def main():
     print("=== Radoskop Szczecin — Scraper Interpelacji ===")
     print(f"Backend: requests + BeautifulSoup\n")
 
-    records = scrape_interpelacje_from_bip(debug=args.debug)
+    records = scrape_interpelacje_from_bip(kadencja=args.kadencja, debug=args.debug)
 
     if not records:
         print("\nUWAGA: Nie znaleziono żadnych interpelacji.")

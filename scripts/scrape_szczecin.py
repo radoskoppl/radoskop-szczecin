@@ -430,8 +430,18 @@ def scrape_single_vote(url: str, session: dict, vote_idx: int, topic: str) -> di
                     except ValueError:
                         pass
 
-    # Parse named votes from div.osobaa elements.
-    # Vote type is a CSS class on the element: osobaa za, osobaa przeciw, etc.
+    # Parse named votes from div.wim sections.
+    # Each div.wim has a h3 header (ZA/PRZECIW/...) and div.osobaa children.
+    # Some eSesja instances put the category as a CSS class on div.osobaa,
+    # others only on the parent div.wim header.
+    header_to_cat = {
+        "za": "za",
+        "przeciw": "przeciw",
+        "wstrzymuj": "wstrzymal_sie",
+        "brak g": "brak_glosu",
+        "nieobecn": "nieobecni",
+    }
+
     class_to_cat = {
         "za": "za",
         "przeciw": "przeciw",
@@ -441,22 +451,39 @@ def scrape_single_vote(url: str, session: dict, vote_idx: int, topic: str) -> di
         "brakglosu": "brak_glosu",
     }
 
-    for osoba in soup.find_all("div", class_="osobaa"):
-        name = osoba.get_text(strip=True)
-        if not name or len(name) <= 2:
+    # Strategy 1: parse by div.wim sections (header determines category)
+    for wim in soup.find_all("div", class_="wim"):
+        h3 = wim.find("h3")
+        if not h3:
             continue
-
-        classes = osoba.get("class", [])
+        h3_text = h3.get_text(strip=True).lower()
         cat_key = None
-        for cls in classes:
-            if cls in class_to_cat:
-                cat_key = class_to_cat[cls]
+        for prefix, cat in header_to_cat.items():
+            if h3_text.startswith(prefix):
+                cat_key = cat
                 break
-
         if not cat_key:
             continue
+        for osoba in wim.find_all("div", class_="osobaa"):
+            name = osoba.get_text(strip=True)
+            if name and len(name) > 2:
+                named_votes[cat_key].append(name)
 
-        named_votes[cat_key].append(name)
+    # Strategy 2 fallback: if div.wim parsing found nothing, try CSS classes on osobaa
+    total_from_wim = sum(len(v) for v in named_votes.values())
+    if total_from_wim == 0:
+        for osoba in soup.find_all("div", class_="osobaa"):
+            name = osoba.get_text(strip=True)
+            if not name or len(name) <= 2:
+                continue
+            classes = osoba.get("class", [])
+            cat_key = None
+            for cls in classes:
+                if cls in class_to_cat:
+                    cat_key = class_to_cat[cls]
+                    break
+            if cat_key:
+                named_votes[cat_key].append(name)
 
     total_named = sum(len(v) for v in named_votes.values())
     if total_named == 0:
