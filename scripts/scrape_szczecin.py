@@ -635,7 +635,7 @@ def build_councilors(all_votes: list[dict], sessions: list[dict], profiles: dict
             "votes_nieobecny": c["votes_nieobecny"],
             "votes_total": total_votes,
             "rebellion_count": len(c["rebellions"]),
-            "rebellions": c["rebellions"][:20],
+            "rebellions": c["rebellions"],
             "has_activity_data": False,
             "activity": None,
         })
